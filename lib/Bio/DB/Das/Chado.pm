@@ -1,4 +1,4 @@
-# $Id: Chado.pm,v 1.1.1.1 2009/04/23 14:06:52 scottcain Exp $
+# $Id: Chado.pm,v 1.5 2009/05/08 13:08:34 scottcain Exp $
 
 =head1 NAME
 
@@ -97,7 +97,7 @@ use constant SEGCLASS => 'Bio::DB::Das::Chado::Segment';
 use constant MAP_REFERENCE_TYPE => 'MapReferenceType'; #dgg
 use constant DEBUG => 0;
 
-$VERSION = 0.2;
+$VERSION = 0.21;
 @ISA = qw(Bio::Root::Root Bio::DasI);
 
 =head2 new
@@ -643,8 +643,8 @@ interrupted.  When a callback is provided, the method returns undef.
 
 sub features {
   my $self = shift;
-  my ($type,$types,$callback,$attributes,$iterator,$feature_id) = 
-       $self->_rearrange([qw(TYPE TYPES CALLBACK ATTRIBUTES ITERATOR FEATURE_ID)],
+  my ($type,$types,$callback,$attributes,$iterator,$feature_id,$seq_id,$start,$end) = 
+       $self->_rearrange([qw(TYPE TYPES CALLBACK ATTRIBUTES ITERATOR FEATURE_ID SEQ_ID START END)],
 			@_);
 
   $type ||= $types; #GRRR
@@ -656,8 +656,34 @@ sub features {
                                             -iterator => $iterator,
                                             -factory  => $self,
                                             -feature_id=>$feature_id,
+                                            -seq_id    =>$seq_id,
+                                            -start     =>$start,
+                                            -end       =>$end,
                                            );
   return @features;
+}
+
+sub get_seq_stream {
+    my $self = shift;
+    warn "get_seq_stream args:@_";
+    my ($type,$types,$callback,$attributes,$iterator,$feature_id,$seq_id,$start,$end) =
+     $self->_rearrange([qw(TYPE TYPES CALLBACK ATTRIBUTES ITERATOR FEATURE_ID SEQ_ID START END)],
+                        @_);
+
+    my @features = $self->_segclass->features(-type => $type,
+                                            -attributes => $attributes,
+                                            -callback => $callback,
+                                            -iterator => $iterator,
+                                            -factory  => $self,
+                                            -feature_id=>$feature_id,
+                                            -seq_id    =>$seq_id,
+                                            -start     =>$start,
+                                            -end       =>$end,
+                                           );
+
+    return Bio::DB::Das::ChadoIterator->new(\@features);
+
+
 }
 
 =head2 types
