@@ -12,7 +12,7 @@ name: Bio-DB-Das-Chado
 provides:
   Bio::DB::Das::Chado:
     file: lib/Bio/DB/Das/Chado.pm
-    version: 0.24
+    version: 2
   Bio::DB::Das::Chado::Segment:
     file: lib/Bio/DB/Das/Chado/Segment.pm
   Bio::DB::Das::Chado::Segment::Feature:
@@ -26,4 +26,4 @@ requires:
   URI::Escape: 0
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.24
+version: 2
