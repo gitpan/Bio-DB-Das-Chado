@@ -1,4 +1,4 @@
-# $Id: Chado.pm,v 1.8 2009/06/04 15:58:09 scottcain Exp $
+# $Id: Chado.pm,v 1.11 2009-08-25 19:29:43 scottcain Exp $
 
 =head1 NAME
 
@@ -97,7 +97,7 @@ use constant SEGCLASS => 'Bio::DB::Das::Chado::Segment';
 use constant MAP_REFERENCE_TYPE => 'MapReferenceType'; #dgg
 use constant DEBUG => 0;
 
-$VERSION = 0.23;
+$VERSION = 0.24;
 @ISA = qw(Bio::Root::Root Bio::DasI);
 
 =head2 new
@@ -113,6 +113,10 @@ $VERSION = 0.23;
  Returns : a new Bio::DB::Das::Chado object
  Args    :
 
+An optional argument is to provide -reference_class => (SO type name) to
+specify what the "base type" is.  Typically, this would be chromosome
+or contig.
+
 =cut
 
 # create new database accessor object
@@ -126,6 +130,7 @@ sub new {
   my $dsn      = $arg{-dsn};
   my $username = $arg{-user};
   my $password = $arg{-pass};
+  my $refclass = $arg{-reference_class};
 
   $self->{db_args}->{dsn}      = $dsn;
   $self->{db_args}->{username} = $username;
@@ -218,8 +223,42 @@ sub new {
   #determine if all_feature_names view or table exist
   #$self->use_all_feature_names();
 
+  #determine the type_id of the ref class and cache it
+  $self->refclass($self->name2term($refclass));
+
   return $self;
 }
+
+=head2 refclass
+
+=over
+
+=item Usage
+
+  $obj->refclass()        #get existing value
+  $obj->refclass($newval) #set new value
+
+=item Function
+
+=item Returns
+
+value of the reference class's cvterm_id (a scalar)
+
+=item Arguments
+
+new value of the reference class's cvterm_id (to set)
+
+=back
+
+=cut
+
+sub refclass {
+    my $self = shift;
+    my $refclass = shift if defined(@_);
+    return $self->{'refclass'} = $refclass if defined($refclass);
+    return $self->{'refclass'};
+}
+
 
 =head2 use_all_feature_names
 
@@ -285,19 +324,69 @@ sub organism_id {
     }
 
     my $dbh = $self->dbh;
+
+    #if there is a space in the name, check genus species
+    if ($organism_name =~ /(\S+?)\s+(.+)/) {
+        my $genus   = $1;
+        my $species = $2;
+        my $species_query = $dbh->prepare("SELECT organism_id FROM organism WHERE genus = ? and species = 
+?");
+        $species_query->execute($genus, $species) or die "organism genus species query failed:$!";
+
+        #don't need to check for multiple rows because of unique constraint
+        if ($species_query->rows == 1) {
+            my($organism_id) = $species_query->fetchrow_array;
+
+            if ($organism_id) {
+                return $self->{'organism_id'} = $organism_id;
+            }
+
+        }
+    }
+
+    #check common name
     my $org_query = $dbh->prepare("SELECT organism_id FROM organism WHERE common_name = ?");
 
     $org_query->execute($organism_name) or die "organism query failed:$!";
 
-    my($organism_id) = $org_query->fetchrow_array;
-    $org_query->finish;
-
-    if ($organism_id) {
-        return $self->{'organism_id'} = $organism_id;
+    #if more than one result for common name, croak
+    if ($org_query->rows > 1) {
+        $self->throw("The common organism name, $organism_name, is present more than once in the organism table; please use a more precice representation of the organism.");
+    }
+    elsif ($org_query->rows == 0 ) {
+        #no--don't do anything here--let it go on to check other things
+        #$self->throw("There is no organism in the organism table with a common name '$organism_name'; please check the spelling.");
     }
     else {
-        $self->warn("organism query returned nothing--I don't know what to do");
+        my($organism_id) = $org_query->fetchrow_array;
+
+        if ($organism_id) {
+            return $self->{'organism_id'} = $organism_id;
+        }
     }
+    $org_query->finish;
+
+    #check abbrev
+    my $abbrev_query = $dbh->prepare("SELECT organism_id FROM organism WHERE abbreviation = ?");
+
+    $abbrev_query->execute($organism_name) or die "organism abbrev query failed:$!";
+
+    if ($abbrev_query->rows > 1) {
+        $self->throw("The abbreviated organism name, $organism_name, is present more than once in the organism table; please use a more precice representation of the organism.");
+    }
+    elsif ($abbrev_query->rows == 0) {
+        #do nothing in case another check is added after this one 
+    }
+    else {
+        my($organism_id) = $abbrev_query->fetchrow_array;
+
+        if ($organism_id) {
+            return $self->{'organism_id'} = $organism_id;
+        }
+    }
+
+    $self->throw("Tried everything to get an organism_id for '$organism_name' but failed; try 'genus species'");
+    return; #of course, this return will never get used
 }
 
 
@@ -666,7 +755,7 @@ sub features {
 
 sub get_seq_stream {
     my $self = shift;
-    warn "get_seq_stream args:@_";
+    #warn "get_seq_stream args:@_";
     my ($type,$types,$callback,$attributes,$iterator,$feature_id,$seq_id,$start,$end) =
      $self->_rearrange([qw(TYPE TYPES CALLBACK ATTRIBUTES ITERATOR FEATURE_ID SEQ_ID START END)],
                         @_);
@@ -993,7 +1082,7 @@ sub _by_alias_by_name {
   my $isth =  $self->dbh->prepare("
        select f.feature_id, f.name, f.type_id,f.uniquename,af.significance as score,
               fl.fmin,fl.fmax,fl.strand,fl.phase, fl.srcfeature_id, fd.dbxref_id,
-              f.is_obsolete
+              f.is_obsolete,f.seqlen
        from feature f join featureloc fl using (feature_id)
             left join analysisfeature af using (feature_id)
             left join feature_dbxref fd using (feature_id) 
@@ -1055,6 +1144,19 @@ sub _by_alias_by_name {
     while (my $hashref = $isth->fetchrow_hashref) {
 
       next if ($$hashref{'is_obsolete'} and !$self->allow_obsolete);
+
+      if ($self->refclass && $$hashref{type_id} == $self->refclass) {
+          #this feature is supposed to be a reference feature
+          my $f = Bio::DB::Das::Chado::Segment->new($$hashref{'name'},
+                                                    $self,
+                                                    1,$$hashref{'seqlen'},
+                                                    $$hashref{'uniquename'},
+                                                    undef,
+                                                    $$hashref{'feature_id'},
+                                                    undef);
+          push @features,$f;
+          next;
+      }
 
       if ($$hashref{'srcfeature_id'} != $old_srcfeature_id) {
         $jsth->execute($$hashref{'srcfeature_id'})
@@ -1214,11 +1316,12 @@ sub _by_alias_by_name {
                    $self->term2name($$hashref{'type_id'}),
                    $self->dbxref2source($$hashref{'dbxref_id'}) || '');
 
-
+            my $srcf = 1 if ($self->refclass() == $$hashref{'type_id'}) ;
+            
             my $feat = Bio::DB::Das::Chado::Segment::Feature->new(
                                         $self,
-                                        $parent_segment,
-                                        $parent_segment->seq_id,
+                                        $srcf ? '' : $parent_segment,
+                                        $srcf ? '' : $parent_segment->seq_id,
                                         $base_start,$$hashref{'fmax'},
                                         $type_obj,
                                         $$hashref{'score'},
@@ -1228,6 +1331,7 @@ sub _by_alias_by_name {
                                         $$hashref{'uniquename'},
                                         $$hashref{'feature_id'}
                                                                );
+
             push @features, $feat;
         }
       } 
