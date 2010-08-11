@@ -90,14 +90,17 @@ use Bio::DasI;
 use Bio::PrimarySeq;
 use Bio::DB::GFF::Typename;
 use DBI;
+use Bio::SeqFeature::Lite;
 use Carp qw(longmess);
 use vars qw($VERSION @ISA);
+
+use Data::Dumper;
 
 use constant SEGCLASS => 'Bio::DB::Das::Chado::Segment';
 use constant MAP_REFERENCE_TYPE => 'MapReferenceType'; #dgg
 use constant DEBUG => 0;
 
-$VERSION = 0.26;
+$VERSION = 0.30;
 @ISA = qw(Bio::Root::Root Bio::DasI);
 
 =head2 new
@@ -113,9 +116,101 @@ $VERSION = 0.26;
  Returns : a new Bio::DB::Das::Chado object
  Args    :
 
-An optional argument is to provide -reference_class => (SO type name) to
-specify what the "base type" is.  Typically, this would be chromosome
-or contig.
+=over
+
+=item -dsn [dsn string]
+
+A full dbi dsn string for the database, optionally including host and port
+information, like "dbi:Pg:dbname=chado;host=localhost;port=5432".
+
+=item -user [username]
+
+The database user name.
+
+=item -pass [password]
+
+The users password for the database.
+
+=item -organism [common_name|abbreviation|"Genus species"]
+
+Used to specify the organism that the features should be drawn from in
+Chado instances that have more than one organism.  The argument can be
+the common name, the abbreviation or "Genus species".  Since common name
+and abbreviation are not guaranteed to be unique, if one of those is supplied
+and it corresponds to more than one organism_id, the Chado adaptor will die.
+Since the combination is guaranteed to be unique by table constraints, 
+supplying "Genus species" should always work.
+
+=item -srcfeatureslice [1|0] default: 0
+
+Setting this to 1 will enable searching for features using a function and
+a corresponding index that can significantly speed searches, as long as
+the featureloc_slice function is present in the Chado instance (all
+"modern" instances of Chado do have this function).  Since it available
+in nearly all Chado instances, in a future release of this adaptor,
+the default value of -srcfeatureslice will be set to 1 (on).
+
+=item -inferCDS [1|0] default: 0
+
+Given mRNA features that have exons and polypeptide features as children,
+when inferCDS is set, the Chado adaptor will calculate the intersection
+of the exons and polypeptide features and create CDS features that result.
+This is generally needed when using gene and mRNA features with glyphs in
+GBrowse that show subparts, like the gene and processed_transcript glyphs.
+Since this is almost always required, in a future release of this adaptor,
+the default will be switched to 1 (on).
+
+=item -fulltext [1|0] default: 0
+
+This item allows full text searching of various Chado text fields,
+including feature.name, feature.uniquename, synonym.synonym_sgml,
+dbxref.accession, and all_feature_names.name (which fequently includes
+featureprop.value, depending on how all_feature_names is configured).  Note
+that to use -fulltext, you must run the preparation script, 
+gmod_chado_fts_prep.pl, on the database, and in addition, it might 
+be a good idea to set up a cronjob to keep the all_feature_names
+materialized view up to date with the materialized view tool,
+gmod_materialized_view_tool.pl.
+
+=item -recursivMapping [1|0] default: 0
+
+In the case where features are mapped to a "small" srcfeature (like
+a contig) and then that small feature is mapped to a larger feature 
+(like a chromosome), setting -recursivMapping will allow the Chado
+adaptor to calculate the coordinates of the feature on the larger
+feature even though it isn't explicitly mapped to it.  The Chado adaptor
+suffers an approximately 20% performance penalty to do this mapping.
+
+=item -allow_obsolete [1|0] default: 0
+
+If set to 1, allow_obsolete will tell the Chado adaptor to ignore the
+feature.is_obsolete column when querying to find features.
+
+=item -enable_seqscan [1|0] default: 1
+
+If set to zero, the -enable_seqscan will send a query planner hint to the
+PostgreSQL server to make it more costly to do sequential scans on a table.
+This is generally not necessary, as the query planner in Pg 8+ is smarter
+than it used to be.
+
+=item -do2Level [1|0] default: 0
+
+do2Level is a flag for specifying that two "levels" at most of features should
+be fetch when getting child features.  This flag is generally unnecessary as
+Bio::Graphics::Glyph supports specifying on a per glyph basis what should
+be fetch.  Use of this flag is incompatible with the -recursivMapping flag.
+
+=item -reference_class [SO type name]
+
+Used to specify what the "base type" is.  Typically, this would be chromosome
+or contig, but setting it is only necessary in the case where features
+are mapped to more than one srcfeature and you don't want to use the
+one that is lowest on the graph.  For example, you have polypeptides that are
+mapped to chromosomes and motifs that are mapped to polypeptides.  If you
+want to display the motifs on the polypeptide, you need to set "polypeptide"
+as the argument for -reference_class.
+
+=back
 
 =cut
 
@@ -226,8 +321,280 @@ sub new {
   #determine the type_id of the ref class and cache it
   $self->refclass($self->name2term($refclass));
 
+  $self->fulltext($arg{-fulltext});
+
   return $self;
 }
+
+=head2 feature_summary
+
+=over
+
+=item Usage
+
+  $obj->feature_summary()
+
+=item Function
+
+This function is based on Bio::DB::SeqFeature::Store->feature_summary.  
+The text that follows comes from it's documtation:
+
+This method is used to get coverage density information across a
+region of interest. You provide it with a region of interest, optional
+a list of feature types, and a count of the number of bins over which
+you want to calculate the coverage density. An object is returned
+corresponding to the requested region. It contains a tag called
+"coverage" that will return an array ref of "bins" length. Each
+element of the array describes the number of features that overlap the
+bin at this postion.
+
+Note that this method uses an approximate algorithm that is only
+accurate to 500 bp, so when dealing with bins that are smaller than
+1000 bp, you may see some shifting of counts between adjacent bins.
+
+Although an -iterator option is provided, the method only ever returns
+a single feature, so this is fairly useless.
+
+=item Returns
+
+A single feature containing summary data, or an interator containing
+that one feature.
+
+=item Arguments
+
+  -seq_id        Sequence ID for the region
+  -start         Start of region
+  -end           End of region
+  -type/-types   Feature type of interest or array ref of types
+  -bins          Number of bins across region. Defaults to 1000.
+  -iterator      Return an iterator across the region
+
+=back
+
+=cut
+
+sub feature_summary {
+    my $self = shift;
+    my ($seq_name,$seq_id,$ref,$start,$stop,$end,$types,$type,$primary_tag,$bins,$iterator) =
+        $self->_rearrange(['SEQID','SEQ_ID','REF','START','STOP','END',
+                   'TYPES','TYPE','PRIMARY_TAG',
+                   'BINS',
+                   'ITERATOR',
+                  ],@_);
+
+    $seq_name ||=$seq_id ||=$ref;
+    $end      ||=$end;
+    $types    ||=$type   ||=$primary_tag;
+
+    my ($coverage,$tag) = $self->coverage_array(-seqid=> $seq_name,
+                                                -start=> $start,
+                                                -end  => $end,
+                                                -type => $types,
+                                                -bins => $bins) or return;
+    my $score = 0;
+    for (@$coverage) { $score += $_ }
+    $score /= @$coverage;
+
+    my $feature = Bio::SeqFeature::Lite->new(-seq_id => $seq_name,
+                                             -start  => $start,
+                                             -end    => $end,
+                                             -type   => $tag,
+                                             -score  => $score,
+                                             -attributes =>
+                                             { coverage => [$coverage] });
+
+    my @features = ($feature);
+    return $iterator
+           ? Bio::DB::Das::ChadoIterator->new(\@features) 
+           : $feature;
+}
+
+
+=head2 coverage_array
+
+=over
+
+=item Usage
+
+  $obj->coverage_array()
+
+=item Function
+
+Calculates the coverage/density of a particular feature type
+over a range.
+
+=item Returns
+
+A reference to the coverage array, or if called in an array
+context, a two element array with the reference to the coverage
+array first and the type that it was called with as the second
+element.
+
+=item Arguments
+
+seqid
+start
+stop
+type
+bins
+
+=back
+
+This is based on the method of the same name in
+Bio::DB::SeqFeature::Store::DBI::mysql
+
+=cut
+
+sub coverage_array {
+    my $self = shift;
+    my ($seq_name,$seq_id,$ref,$start,$end,$stop,$types,$type,$primary_tag,$bins) =
+        $self->_rearrange(['SEQID','SEQ_ID','REF','START','STOP','END',
+                   'TYPES','TYPE','PRIMARY_TAG','BINS'],@_);
+
+    $seq_name ||= $seq_id ||= $ref;
+    $types    ||= $type   ||= $primary_tag;
+    $end      ||= $stop;
+
+    my $summary_bin_size = 1000;
+    $bins  ||= 1000;
+    $start ||= 1;
+    my $segment = $self->segment(-name =>$seq_name) or $self->throw("unknown seq_id $seq_name");
+    $end   ||= $segment->end;
+  
+    my $binsize = ($end-$start+1)/$bins;
+    my $seqid   = $segment->feature_id;
+
+    return [] unless $seqid;
+
+    # where each bin starts
+    my @his_bin_array = map {$start + $binsize * $_}       (0..$bins);
+    my @sum_bin_array = map {int(($_-1)/$summary_bin_size)} @his_bin_array;
+
+    my $interval_stats    = 'gff_interval_stats';
+   
+    # pick up the type ids
+
+    my %bins;
+    my $sql = <<END;
+SELECT bin,cum_count
+  FROM $interval_stats
+  WHERE typeid=? AND bin >=? AND srcfeature_id =?
+  LIMIT 1
+END
+;
+
+    my $sth = $self->dbh->prepare($sql);
+
+    my @t;
+    if (ref $types eq 'ARRAY') {
+        @t = @$types;
+    }
+    else {
+        @t = ($types);
+    }
+
+    eval {
+        for my $typeid (@t) {
+            my $typestr = $self->_types_sql($typeid); 
+
+            for (my $i=0;$i<@sum_bin_array;$i++) {
+
+                my @args = ($typestr,$sum_bin_array[$i],$seqid);
+
+                $sth->execute(@args) or $self->throw($sth->errstr);
+                my ($bin,$cum_count) = $sth->fetchrow_array;
+                push @{$bins{$typeid}},[$bin,$cum_count];
+            }
+        }
+    };
+
+
+    return unless %bins;
+
+    my @tags;
+    my @merged_bins;
+    my $firstbin = int(($start-1)/$binsize);
+    for my $type (keys %bins) {
+        push @tags, $type;
+        my $arry       = $bins{$type};
+        my $last_count = $arry->[0][1];
+        my $last_bin   = -1;
+        my $i          = 0;
+        my $delta;
+        for my $b (@$arry) {
+            my ($bin,$count) = @$b;
+            $delta              = $count - $last_count if $bin > $last_bin;
+            $merged_bins[$i++]  = $delta;
+            $last_count         = $count;
+            $last_bin           = $bin;
+        }
+    }
+
+    my $report_tag = join(",",@tags);
+    return wantarray ? (\@merged_bins,$report_tag) : \@merged_bins;
+}
+
+
+sub _types_sql {
+  my $self  = shift;
+  my $type = shift;
+  my ($primary_tag,$source_tag,$typestr);
+
+    if (ref $type && $type->isa('Bio::DB::GFF::Typename')) {
+      $primary_tag = $type->method;
+      $source_tag  = $type->source;
+    } else {
+      ($primary_tag,$source_tag) = split ':',$type,2;
+    }
+
+    if (defined $source_tag) {
+      if (length($primary_tag)) {
+        $typestr =  "$primary_tag:$source_tag";
+      }
+      else {
+        $typestr =  "%:$source_tag";
+      }
+    } else {
+      $typestr = "$primary_tag:%";
+    }
+
+  return ($typestr);
+}
+
+
+
+=head2 fulltext
+
+=over
+
+=item Usage
+
+  $obj->fulltext()        #get existing value
+  $obj->fulltext($newval) #set new value
+
+=item Function
+
+Flag to govern the use of full text searching queries
+
+=item Returns
+
+value of fulltext (a scalar)
+
+=item Arguments
+
+new value of fulltext (to set)
+
+=back
+
+=cut
+
+sub fulltext {
+    my $self = shift;
+    my $fulltext = shift if defined(@_);
+    return $self->{'fulltext'} = $fulltext if defined($fulltext);
+    return $self->{'fulltext'};
+}
+
 
 =head2 refclass
 
@@ -561,6 +928,11 @@ sub dbh {
   my $dbh = DBI->connect( $dsn, $username, $password )
     or $self->throw("unable to open db handle");
   $self->{'dbh'} = $dbh;
+
+  if (exists($self->{-enable_seqscan}) && ! $self->{-enable_seqscan}){
+    $dbh->do("set enable_seqscan=0");
+  }
+
   return $self->{'dbh'};
 }
 
@@ -944,6 +1316,12 @@ sub _by_alias_by_name {
     }
   }
 
+##I think this is where this should go...
+  # We need to split the query on whitespaces, and replace the whitespace with &
+  # so that we can get proper full test search on allquery terms [LP]
+  # but it only make sense to do this for full text searching [Scott]
+  $name = $self->_search_name_prep_spaces($name) if $self->fulltext;
+
 
   my $wildcard = 0;
   if ($name =~ /\*/) {
@@ -999,11 +1377,16 @@ sub _by_alias_by_name {
           : "all_feature_names afn ";
 
     my $alias_only_where;
-    if ($wildcard) {
-      $alias_only_where = "where lower(afn.name) like ?";
+    # There is no difference in the wildcard or non-wildcard call to 
+    # the full-text search [LP]
+    if ($self->fulltext) {
+        $alias_only_where = "where afn.searchable_name @@ to_tsquery(?)";
+    }
+    elsif ($wildcard) {
+        $alias_only_where = "where lower(afn.name) like ?";
     }
     else {
-      $alias_only_where = "where lower(afn.name) = ?";
+        $alias_only_where = "where lower(afn.name) = ?";
     }
 
     $where_part = $where_part ?
@@ -1018,14 +1401,20 @@ sub _by_alias_by_name {
           : "feature_synonym fs, synonym s ";
 
     my $alias_only_where;
-    if ($wildcard) {
-      $alias_only_where  = "where fs.synonym_id = s.synonym_id and\n"
-                    . "lower(s.synonym_sgml) like ?";
-    } 
-    else {
-      $alias_only_where  = "where fs.synonym_id = s.synonym_id and\n"
-                    . "lower(s.synonym_sgml) = ?";
+    # Again, with full-text there's no difference in wildcard/non-wildcard [LP]
+    if ($self->fulltext) {
+        $alias_only_where = "where fs.synonym_id = s.synonym_id and\n"
+                   . "s.searchable_synonym_sgml @@ to_tsquery(?)";
     }
+    elsif ($wildcard) {
+        $alias_only_where  = "where fs.synonym_id = s.synonym_id and\n"
+                   . "lower(s.synonym_sgml) like ?";
+    }
+    else {
+        $alias_only_where  = "where fs.synonym_id = s.synonym_id and\n"
+                   . "lower(s.synonym_sgml) = ?";
+    }
+
 
     $where_part = $where_part ?
                     "$alias_only_where $where_part"
@@ -1037,12 +1426,18 @@ sub _by_alias_by_name {
     $from_part   = " feature f ";
 
     my $name_only_where;
-    if ($wildcard) {
-      $name_only_where = "where lower(f.name) like ?";
+    # Using full text search we only need create one WHERE clause, regardless of
+    # the presence of any wildcards... [LP]
+    if ($self->fulltext) {
+        $name_only_where = "where f.searchable_name @@ to_tsquery(?)";
+    }
+    elsif ($wildcard) {
+        $name_only_where = "where lower(f.name) like ?";
     }
     else {
-      $name_only_where = "where lower(f.name) = ?";
+        $name_only_where = "where lower(f.name) = ?";
     }
+
 
     $where_part = $where_part ?
                     "$name_only_where $where_part" 
@@ -1050,6 +1445,11 @@ sub _by_alias_by_name {
   }
 
   my $query = $select_part . ' FROM ' . $from_part . $where_part;
+
+  # Added at suggestion of James Ward to strip confusing/fatal whitespace,
+  # so we trim leading and trailing whitespace before processing query [LP]
+  $query =~ s/^[ \t\r\n]+|[ \t\r\n]$//g;
+
 
   warn "first get_feature_by_name query:$query" if DEBUG;
 
@@ -1353,6 +1753,19 @@ sub _by_alias_by_name {
   return @features;
 }
 
+# Handle spaces in search query; we need to avoid replacing 
+# ' & ' with ' & & & ', though... [LP]
+sub _search_name_prep_spaces {
+    my $self = shift;
+    my $name = shift;
+
+    $name =~ s/\s&\s/ /g;   # Replace any user-defined ' & ' with spaces...
+    $name =~ s/\s/ & /g;    # then replace all spaces with ' & '
+
+    return $name;
+}
+
+
 *fetch_feature_by_name = \&get_feature_by_name; 
 
 sub get_feature_by_feature_id {
@@ -1408,10 +1821,26 @@ sub _search_name_prep {
   my $self = shift;
   my $name = shift;
 
-  $name =~ s/_/\\_/g;  # escape underscores in name
-  $name =~ s/\%/\\%/g; # ditto for percent signs
+  if ($self->fulltext) {
 
-  $name =~ s/\*/%/g;
+  # For full-text search, the appropriate extension wildcard
+  # is ':*' for prefix-matching.  There are limitations to 
+  # full-text search in that we cannot find internal parts of
+  # words, so wildcards can only come at the ends of phrases/
+  # lexemes.  Internal * are converted by tsquery into & [LP]
+    $name =~ s/_/\\_/g;             # escape underscores in name
+    $name =~ s/(?<=\s)\*//g;        # lose prefix wildcards (word start)
+    $name =~ s/(?<=^)\*//g;         # lose prefix wildcards (query start)
+    $name =~ s/\*(?=$)/:\*/g;       # convert trailing * (query end) into :*
+    $name =~ s/\*(?=\s)/:\*/g;      # convert trailing * (word end) into :*
+
+  }
+  else {
+    $name =~ s/_/\\_/g;  # escape underscores in name
+    $name =~ s/\%/\\%/g; # ditto for percent signs
+
+    $name =~ s/\*/%/g;
+  }
 
   return $name;
 }
