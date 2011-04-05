@@ -102,7 +102,7 @@ use constant DEBUG => 0;
 
 use vars qw(@ISA $VERSION);
 @ISA = qw(Bio::Root::Root Bio::SeqI Bio::Das::SegmentI Bio::DB::Das::Chado);
-$VERSION = 0.30;
+$VERSION = 0.31;
 
 #use overload '""' => 'asString';
 
@@ -984,7 +984,7 @@ sub features {
 
     # set type variable 
 
-    $sql_types = '';
+    #$sql_types = '';
 
     my $valid_type = undef;
     if ($types && scalar @$types != 0) {
@@ -1120,7 +1120,10 @@ sub features {
     $where_part  .= " and $sql_types " 
          if defined ($sql_types);
     $where_part  .= " and fl.srcfeature_id = $srcfeature_id " 
-         if defined($srcfeature_id);
+         if (defined($srcfeature_id) and 
+            !$factory->srcfeatureslice and 
+            !(defined $interbase_start) and 
+            !(defined $rend));
   }
 
   #the ref $self check had to be added here to make gbrowse_details work
@@ -1893,6 +1896,30 @@ sub species {
   my $spp= $hashref->{genus}.' '.$hashref->{species}; # works for display uses
   return $self->{'species'}= $spp;
 }
+
+
+=head2 primary_seq
+
+  Title   : primary_seq
+  Usage   : $s->primary_seq()
+  Function: Get a Bio::PrimarySeqI compliant object
+  Returns : Bio::PrimarySeqI
+  Args    : none
+
+=cut
+
+sub primary_seq {
+    my $self = shift;
+
+    return Bio::PrimarySeq->new(
+        -seq              => $self->seq->seq,
+        -display_id       => $self->display_id,
+        -accession_number => $self->accession_number,
+        -primary_id       => $self->primary_id,
+        -desc             => $self->desc,
+    );
+}
+
 
 =head2 get_feature_stream
 
