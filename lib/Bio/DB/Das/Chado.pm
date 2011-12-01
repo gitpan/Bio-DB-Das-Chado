@@ -64,9 +64,9 @@ track the bugs and their resolution.
   http://sourceforge.net/tracker/?group_id=27707&atid=391291
 
 
-=head1 AUTHOR - Scott Cain 
+=head1 AUTHOR
 
-Email scain@cpan.org
+Scott Cain <scain@cpan.org>
 
 =head1 LICENSE
 
@@ -100,7 +100,7 @@ use constant SEGCLASS => 'Bio::DB::Das::Chado::Segment';
 use constant MAP_REFERENCE_TYPE => 'MapReferenceType'; #dgg
 use constant DEBUG => 0;
 
-$VERSION = 0.32;
+$VERSION = 0.33;
 @ISA = qw(Bio::Root::Root Bio::DasI);
 
 =head2 new
