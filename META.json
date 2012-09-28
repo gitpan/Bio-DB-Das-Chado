@@ -34,15 +34,15 @@
    "provides" : {
       "Bio::DB::Das::Chado" : {
          "file" : "lib/Bio/DB/Das/Chado.pm",
-         "version" : "0.33"
+         "version" : "0.34"
       },
       "Bio::DB::Das::Chado::Segment" : {
          "file" : "lib/Bio/DB/Das/Chado/Segment.pm",
-         "version" : "0.33"
+         "version" : "0.34"
       },
       "Bio::DB::Das::Chado::Segment::Feature" : {
          "file" : "lib/Bio/DB/Das/Chado/Segment/Feature.pm",
-         "version" : "0.33"
+         "version" : "0.34"
       },
       "Bio::DB::Das::ChadoIterator" : {
          "file" : "lib/Bio/DB/Das/Chado.pm",
@@ -55,5 +55,5 @@
          "http://dev.perl.org/licenses/"
       ]
    },
-   "version" : "0.33"
+   "version" : "0.34"
 }
